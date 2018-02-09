@@ -1,3 +1,4 @@
+import cProfile
 import os.path
 import math
 import random
@@ -49,12 +50,13 @@ turns_to_flagcheck = 10  # steps to take before a planet checks whether intensiv
 proximity_limit = 2 * AU  # radius to check for proximity alert on object simulation
 turn_limit = 2000  # how long to run the simulation
 alert_freq = 5  # print status every N turns
-use_quadrants = False  # use quadrants to optimize calculations. currently broken
+use_quadrants = False  # use quadrants to optimize calculations. currently used for multiproccessing sims
 resolve_collisions = False  # to make prototyping easier, ignore collisions
 use_custom_seed = False  # look for user specified seed when initializing
 quiet = True  # whether we should spam the console when plotting (will update later with levels)
-generate_plots = False  # whether we should output plots
-generate_json = True
+generate_plots = True  # whether we should output plots
+generate_json = False
+test_map = True # used to test pool.map vs map
 
 # json file variables
 dist_units = 15 * solar_radius  # can't have such huge numbers, so all values will be in solar radii
@@ -110,12 +112,6 @@ for file in file_list:
 thread_count = 2  # how many threads to utilize (4 on laptop, 8 on pc)
 
 
-# results = pool.map(urllib2.urlopen, urls)
-# close the pool and wait for the work to finish
-# pool.close()
-# pool.join()
-
-
 class Universe:
     def __init__(self):
         self.name = name_generator.generate().title()
@@ -143,9 +139,13 @@ class Universe:
         self.up_time = 0
         self.vpy_spheres = []
         self.colliding_bodies = []
-        initpool = ThreadPool(thread_count)
-        for i in range(self.number_of_bodies):
-            initpool.apply_async(self.generate_planet(), ())
+        if use_quadrants:
+            initpool = ThreadPool(thread_count)
+            for i in range(self.number_of_bodies):
+                initpool.apply_async(self.generate_planet(), ())
+        else:
+            for i in range(self.number_of_bodies):
+                self.generate_planet()
         for body in self.active_contents:
             body.get_surface_temp(self)
             if body.is_blackhole:
@@ -157,7 +157,7 @@ class Universe:
         gen_log_file.writelines('Generated %d planets, %d stars, and %d blackholes' % (
             len(self.planets), len(self.stars), len(self.blackholes)) + '\n')
         print('Generation complete - number of stars: %d of %d' % (len(self.stars), self.number_of_bodies))
-        gen_log_file.close()
+        #gen_log_file.close()
         if generate_plots:
             print('Initializing Plots')
             self.output = plt.figure()
@@ -211,7 +211,7 @@ class Universe:
         lines[-1] = lines[-1][:-1]
         lines.append(']}')
         self.json_file.writelines(lines)
-        self.json_file.close()
+        #self.json_file.close()
 
     def plot_data(self, data='mass'):
         if data == 'mass':
@@ -241,15 +241,23 @@ class Universe:
         updatepool = ThreadPool(thread_count)
         if len(self.colliding_bodies) > 0:
             sim_log_file.write('There are %d colliding systems this step\n' % len(self.colliding_bodies))
-            updatepool.map(self.resolve_collisions, self.colliding_bodies)
+            if use_quadrants:
+                updatepool.map(self.resolve_collisions, self.colliding_bodies)
+            else:
+                updatepool.map(self.resolve_collisions, self.colliding_bodies)
             self.colliding_bodies = []
-        if not use_quadrants:
+        if use_quadrants:
             updatepool.map(self.calculate_body_update, self.active_contents)
             updatepool.map(self.apply_body_update, self.active_contents)
             updatepool.map(self.check_body_flags, self.active_contents)
             updatepool.close()
             updatepool.join()
+        else:
+            map(self.calculate_body_update, self.active_contents)
+            map(self.apply_body_update, self.active_contents)
+            map(self.check_body_flags, self.active_contents)
         self.up_time += 1
+        updatepool.close()
         sim_log_file.write('Finished step\n')
 
     def calculate_body_update(self, body):
@@ -340,7 +348,7 @@ class Universe:
             if self.up_time % alert_freq == 0:
                 print('Running step %d' % self.up_time)
             self.update_step()
-        sim_log_file.close()
+        #sim_log_file.close()
         print('Simulation Complete')
         if generate_plots:
             print('Making Plots')
@@ -356,7 +364,6 @@ class Universe:
         self.total_contents = self.active_contents.copy()
         self.total_contents.update(self.removed_contents)
         pool.map(self.plot_body, self.total_contents)
-        # close the pool and wait for the work to finish
         pool.close()
         pool.join()
         print('Plotting collisions')
@@ -378,7 +385,7 @@ class Universe:
         ys = []
         zs = []
         print('Getting history')
-        for point in self.total_contents[body]:
+        for step, point in self.total_contents[body]:
             xs.append(point[0])
             ys.append(point[1])
             zs.append(point[2])
@@ -730,16 +737,19 @@ class CelestialBody:
 
 
 def stress_test():
-    global turn_limit, seed, timestep, alert_freq, quiet, thread_count, planet_min_count, planet_max_count
-    turn_limit = 1000
+    global turn_limit, seed, timestep, alert_freq, quiet, thread_count, planet_min_count, planet_max_count, use_quadrants, generate_json, generate_plots, test_map
+    turn_limit = 500
     seed = 100
     timestep = 1
-    alert_freq = 1000
+    alert_freq = 5
     quiet = True
+    use_quadrants = False
     thread_count = 2
-    planet_count = 4
+    planet_count = 100
     planet_max_count = planet_count
     planet_min_count = planet_count
+    generate_json = False
+    generate_plots = False
     random.seed(seed)
     np.random.seed(seed)
     testverse = Universe()
@@ -757,7 +767,8 @@ def exec_stress_test():
     # pc (2) :
     # pc (4) :
     # pc (8) :
+    # laptop (2) (pool.map - 100 bodies) : .52
+    # laptop (2) (map - 100 bodies) : .47
 
 
-universe = Universe()
-universe.run_sim()
+cProfile.run('stress_test()', sort='cumulative')
