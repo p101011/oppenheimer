@@ -12,15 +12,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from markovnamegen import MarkovGenerator
 from multiprocessing.dummy import Pool as ThreadPool
 
-# mass will be measured in Jupiter Masses
-# 1 JM = 1.9e27 kg
-# 1 JM = 0.001 Solar Mass
-# Threshold for nuclear fusion is 8 JM
-# Largest Star Possible is 150000 JM
-
-# universe generation variables
-planet_min_count = 2  # min number of generated bodies
-planet_max_count = 2  # max number of bodies to generate
+# universe generation constants (or values which probably wont be tweaked)
 max_planet_mass = 2.85e32
 min_planet_mass = 1e15
 star_freq = .4  # results in about 33% bodies being stars, lowering causes many to not reach threshold
@@ -29,22 +21,11 @@ k = 8314  # gas constant
 s = 5.67e-8  # Stefan-Boltzmann constant, used in determining surface temp
 c = 2.998e+8  # speed of light
 AU = 1.496e11  # astronomical unit -> m
-timestep = 60  # measured in seconds
 solar_luminosity = 3.8328e26
 solar_mass = 1.989e30
 solar_radius = 6.955e8
 comp_variance = 0.5  # a body may have +- this much relative amount of an element
-starting_point_max = 1 * AU  # max position in 3d space
 starting_spin = 2  # max spin velocity in rad/s
-big_bang_momentum = 0  # starting impulse for planets in kg*m/s
-turns_to_flagcheck = 10  # steps to take before calling a planet to check whether intensive calculations are needed
-proximity_limit = 2 * AU  # radius to check for proximity alert on object simulation
-turn_limit = 2000  # how long to run the simulation
-alert_freq = 1  # print status every N turns
-use_quadrants = False  # use quadrants to optimize calculations. currently broken
-use_seed = False  # name on tin
-quiet = True  # whether we should spam the console when plotting
-generate_plots = True  # whether we should output plots
 element_dict = {'H': [73.9, 1, 90],
                 'He': [24.0, 4, 180],
                 'O': [10.4, 16, 1430],
@@ -55,6 +36,28 @@ element_dict = {'H': [73.9, 1, 90],
                 'Si': [0.65, 28, 2330],
                 'Mg': [0.58, 24, 1740],
                 'S': [0.44, 32, 2070]}
+
+# universe generation variables
+planet_min_count = 15  # min number of generated bodies
+planet_max_count = 15  # max number of bodies to generate
+starting_point_max = .5 * AU  # max position in 3d space
+big_bang_momentum = 0  # starting impulse for planets in kg*m/s
+
+# universe simulation variables
+timestep = 180  # measured in seconds
+turns_to_flagcheck = 10  # steps to take before a planet checks whether intensive calculations are needed (unused)
+proximity_limit = 2 * AU  # radius to check for proximity alert on object simulation
+turn_limit = 2000  # how long to run the simulation
+alert_freq = 5  # print status every N turns
+use_quadrants = False  # use quadrants to optimize calculations. currently broken
+resolve_collisions = False  # to make prototyping easier, ignore collisions
+use_custom_seed = False  # look for user specified seed when initializing
+quiet = True  # whether we should spam the console when plotting (will update later with levels)
+generate_plots = False  # whether we should output plots
+generate_json = True
+
+# json file variables
+dist_units = 15 * solar_radius  # can't have such huge numbers, so all values will be in solar radii
 
 # log file initialization
 # two files - one for generation, one for simulation
@@ -76,7 +79,7 @@ gen_log_file = open(gen_path, 'w', encoding="utf-8")
 sim_log_file = open(sim_path, 'w', encoding="utf-8")
 
 # seed generation
-if use_seed:
+if use_custom_seed:
     seed = input('Enter seed: ')
     try:
         seed = int(seed)
@@ -90,7 +93,6 @@ if use_seed:
 
 else:
     seed = random.randint(0, 999999)
-seed = 100
 random.seed(seed)
 np.random.seed(seed)
 gen_log_file.writelines('Seed for this execution: ' + str(seed) + '\n')
@@ -105,7 +107,7 @@ for file in file_list:
     name_generator.load_csv(file_path)
 
 # parallel processing initialization
-thread_count = 4  # how many threads to utilize (4 on laptop, 8 on pc)
+thread_count = 2  # how many threads to utilize (4 on laptop, 8 on pc)
 
 
 # results = pool.map(urllib2.urlopen, urls)
@@ -116,6 +118,7 @@ thread_count = 4  # how many threads to utilize (4 on laptop, 8 on pc)
 
 class Universe:
     def __init__(self):
+        self.name = name_generator.generate().title()
         self.total_contents = {}
         self.active_contents = {}
         self.removed_contents = {}
@@ -143,7 +146,6 @@ class Universe:
         initpool = ThreadPool(thread_count)
         for i in range(self.number_of_bodies):
             initpool.apply_async(self.generate_planet(), ())
-        #  self.create_smbh()
         for body in self.active_contents:
             body.get_surface_temp(self)
             if body.is_blackhole:
@@ -155,32 +157,61 @@ class Universe:
         gen_log_file.writelines('Generated %d planets, %d stars, and %d blackholes' % (
             len(self.planets), len(self.stars), len(self.blackholes)) + '\n')
         print('Generation complete - number of stars: %d of %d' % (len(self.stars), self.number_of_bodies))
-        #  gen_log_file.close()
-        print('Initializing Subplots')
-        self.output = plt.figure()
-        self.ax1 = self.output.add_subplot(2, 2, 1, projection="3d")
-        self.ax2 = self.output.add_subplot(2, 2, 2)
-        self.ax3 = self.output.add_subplot(2, 2, 3)
-        self.ax4 = self.output.add_subplot(2, 2, 4)
-        self.ax1.set_title('3D')
-        self.ax2.set_title('Overhead')
-        self.ax3.set_title('Front')
-        self.ax4.set_title('Side')
-        self.ax1.set_xlabel('X')
-        self.ax1.set_ylabel('Y')
-        self.ax2.set_xlabel('X')
-        self.ax2.set_ylabel('Y')
-        self.ax3.set_xlabel('X')
-        self.ax3.set_ylabel('Z')
-        self.ax4.set_xlabel('Y')
-        self.ax4.set_ylabel('Z')
+        gen_log_file.close()
+        if generate_plots:
+            print('Initializing Plots')
+            self.output = plt.figure()
+            self.ax1 = self.output.add_subplot(2, 2, 1, projection="3d")
+            self.ax2 = self.output.add_subplot(2, 2, 2)
+            self.ax3 = self.output.add_subplot(2, 2, 3)
+            self.ax4 = self.output.add_subplot(2, 2, 4)
+            self.ax1.set_title('3D')
+            self.ax2.set_title('Overhead')
+            self.ax3.set_title('Front')
+            self.ax4.set_title('Side')
+            self.ax1.set_xlabel('X')
+            self.ax1.set_ylabel('Y')
+            self.ax2.set_xlabel('X')
+            self.ax2.set_ylabel('Y')
+            self.ax3.set_xlabel('X')
+            self.ax3.set_ylabel('Z')
+            self.ax4.set_xlabel('Y')
+            self.ax4.set_ylabel('Z')
+        if generate_json:
+            print('Initializing JSON')
+            json_path = 'xperience'
+            json_name = 'lastgen.json'
+            json_path = os.path.join(json_path, json_name)
+            self.json_file = open(json_path, 'w')
 
     def generate_planet(self):
         print('Generating Body')
         body_comp = self.generate_composition()
         new_body = CelestialBody(body_comp, self)
         self.active_contents[new_body] = []
-        self.active_contents[new_body].append(new_body.position)
+
+    def dump_info(self):
+        lines = ['{"name": "%s", "turns": [' % self.name]
+        self.total_contents = self.active_contents.copy()
+        self.total_contents.update(self.removed_contents)
+        for turn in range(turn_limit):
+            lines.append('{"planets": [')
+            for body in self.total_contents:
+                timestamp, position = self.total_contents[body][turn]
+                line = '{"name": "%s", "radius": "%f", "position": ["%f", "%f", "%f"],' % (
+                    body.name, body.radius / dist_units, position[0] / dist_units, position[1] / dist_units,
+                    position[2] / dist_units)
+                if timestamp == turn:
+                    line += ' "exists": "true"},'
+                else:
+                    line += ' "exists": "false"},'
+                lines.append(line)
+            lines[-1] = lines[-1][:-1]  # remove trailing comma from list
+            lines.append(']},')
+        lines[-1] = lines[-1][:-1]
+        lines.append(']}')
+        self.json_file.writelines(lines)
+        self.json_file.close()
 
     def plot_data(self, data='mass'):
         if data == 'mass':
@@ -191,12 +222,6 @@ class Universe:
             plt.hist(plot, 100)
             plt.xlabel('Mass (kg)')
             plt.show()
-
-    def create_smbh(self):
-        body_comp = self.generate_composition()
-        smbh = CelestialBody(body_comp, self, mass=5e60)
-        self.active_contents[smbh] = []
-        self.active_contents[smbh].append(smbh.position)
 
     def get_stars(self):
         return self.stars
@@ -231,7 +256,7 @@ class Universe:
                 work_quadrant = promised_quadrants[index]
                 for body in work_quadrant:
                     body.massless_update(self, work_quadrant)
-                    self.active_contents[body].append(body.position)
+                    self.active_contents[body].append((self.up_time, body.position))
                     if len(body.flags) > 0:
                         sim_log_file.write(str(body) + 'has %d flags after calculations\n' % len(body.flags))
                         body.promised = True
@@ -250,7 +275,7 @@ class Universe:
                     else:
                         check = False
                     body.quick_update(check)
-                    self.active_contents[body].append(body.position)
+                    self.active_contents[body].append((self.up_time, body.position))
                     if check:
                         if len(body.flags) > 0:
                             sim_log_file.write(str(body) + 'has %d flags after calculations\n' % len(body.flags))
@@ -259,7 +284,7 @@ class Universe:
         else:
             for key in self.active_contents:
                 key.massless_update(self)
-                self.active_contents[key].append(key.position)
+                self.active_contents[key].append((self.up_time, key.position))
                 if len(key.flags) > 0:
                     sim_log_file.write(str(key) + 'has %d flags after calculations\n' % len(key.flags))
                     key.promised = True
@@ -304,38 +329,41 @@ class Universe:
         return composition
 
     def resolve_collisions(self):
-        while len(self.colliding_bodies) > 0:
-            sim_log_file.write('Resolving collisions for:\n')
-            workspace = self.colliding_bodies[0]
-            total_mass = 0
-            total_p = 0
-            total_l = 0
-            total_composition = [[x, 0] for x in element_dict.keys()]
-            total_composition = sorted(total_composition, key=lambda x: x[0])
-            total_position = [0, 0, 0]
-            for body in workspace:
-                sim_log_file.write('\t%s\n' % body)
-                total_mass += body.mass
-                total_p += (body.mass * body.velocity)
-                mom_iner = .4 * body.mass * body.radius ** 2
-                total_l += (mom_iner * body.spin)
-                for index, pair in enumerate(body.composition):
-                    total_composition[index][1] += pair[1]
-                total_position += body.position
-                self.removed_contents[body] = self.active_contents[body]
-                del self.active_contents[body]
-            new_mass = total_mass
-            new_velocity = total_p / new_mass
-            for element, abundance in total_composition:
-                abundance /= len(workspace)
-            new_composition = total_composition
-            new_position = total_position / len(workspace)
-            new_body = CelestialBody(new_composition, self, new_mass, new_position, new_velocity, total_l,
-                                     time=self.up_time)
-            self.active_contents[new_body] = []
-            self.active_contents[new_body].append(new_body.position)
-            self.collision_points.append(new_position)
-            del self.colliding_bodies[0]
+        if resolve_collisions:
+            while len(self.colliding_bodies) > 0:
+                sim_log_file.write('Resolving collisions for:\n')
+                workspace = self.colliding_bodies[0]
+                total_mass = 0
+                total_p = 0
+                total_l = 0
+                total_composition = [[x, 0] for x in element_dict.keys()]
+                total_composition = sorted(total_composition, key=lambda x: x[0])
+                total_position = [0, 0, 0]
+                for body in workspace:
+                    sim_log_file.write('\t%s\n' % body)
+                    total_mass += body.mass
+                    total_p += (body.mass * body.velocity)
+                    mom_iner = .4 * body.mass * body.radius ** 2
+                    total_l += (mom_iner * body.spin)
+                    for index, pair in enumerate(body.composition):
+                        total_composition[index][1] += pair[1]
+                    total_position += body.position
+                    self.removed_contents[body] = self.active_contents[body]
+                    del self.active_contents[body]
+                new_mass = total_mass
+                new_velocity = total_p / new_mass
+                for element, abundance in total_composition:
+                    abundance /= len(workspace)
+                new_composition = total_composition
+                new_position = total_position / len(workspace)
+                new_body = CelestialBody(new_composition, self, new_mass, new_position, new_velocity, total_l,
+                                         time=self.up_time)
+                self.active_contents[new_body] = []
+                self.active_contents[new_body].append(new_body.position)
+                self.collision_points.append(new_position)
+                del self.colliding_bodies[0]
+        else:
+            self.colliding_bodies = []
 
     def __str__(self):
         return 'number of stars: %d of %d' % (len(self.stars), self.number_of_bodies)
@@ -346,8 +374,14 @@ class Universe:
             if self.up_time % alert_freq == 0:
                 print('Running step %d' % self.up_time)
             self.update_step()
-        #  sim_log_file.close()
+        sim_log_file.close()
         print('Simulation Complete')
+        if generate_plots:
+            print('Making Plots')
+            self.generate_sim_plot()
+        if generate_json:
+            print('Writing JSON')
+            self.dump_info()
 
     def generate_sim_plot(self):
         pool = ThreadPool(thread_count)
@@ -677,7 +711,7 @@ class CelestialBody:
         return str(self)
 
 
-def test_run():
+def stress_test():
     global turn_limit, seed, timestep, alert_freq, quiet, thread_count, planet_min_count, planet_max_count
     turn_limit = 1000
     seed = 100
@@ -690,20 +724,22 @@ def test_run():
     planet_min_count = planet_count
     random.seed(seed)
     np.random.seed(seed)
-    universe = Universe()
-    universe.run_sim()
-    universe.generate_sim_plot()
+    testverse = Universe()
+    testverse.run_sim()
 
 
-trial_count = 10
-exec_time = timeit.timeit(stmt=test_run, number=trial_count)
-print(exec_time / trial_count)
+def exec_stress_test():
+    trial_count = 10
+    exec_time = timeit.timeit(stmt=stress_test, number=trial_count)
+    print(exec_time / trial_count)
+    # laptop (1) : 279.58
+    # laptop (2) :94.69
+    # laptop (4) : 122.85
+    # pc (1) :
+    # pc (2) :
+    # pc (4) :
+    # pc (8) :
 
 
-# laptop (1) : 279.58
-# laptop (2) :94.69
-# laptop (4) : 122.85
-# pc (1) :
-# pc (2) :
-# pc (4) :
-# pc (8) :
+universe = Universe()
+universe.run_sim()
