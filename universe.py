@@ -230,73 +230,45 @@ class Universe:
         return self.planets
 
     def update_step(self):
-        """Three phases to an update: First phase is promises. Pending property changes are calculated here.
-        Second phase updates all bodies. If the area had no promises, this is just updating position and rotation.
-        Third phase is a promise check. If any bodies send up a flag signalling more thorough calculations needed, they
-        are added to the promise list for next turn."""
+        """Four phases to an update: First phase is promises. Pending property changes are calculated here. Second
+        phase calculates all the changes for the planet for one timestep (updating pos, v, a). Third phase applies
+        the changes. Fourth phase is a promise check. If any bodies send up a flag signalling more thorough
+        calculations needed, they are added to the promise list for next turn. """
         sim_log_file.write('\nExecuting step %d: \n' % self.up_time)
         promised_quadrants = []
         quick_quadrants = []
         planet_calculations = 0
+        updatepool = ThreadPool(thread_count)
         if len(self.colliding_bodies) > 0:
             sim_log_file.write('There are %d colliding systems this step\n' % len(self.colliding_bodies))
-            self.resolve_collisions()
-        if use_quadrants:
-            for key in self.quadrants:
-                sim_log_file.write('Checking quadrant ' + str(key) + '\n')
-                quadrant = self.quadrants[key]
-                if self.check_quadrant_promise(quadrant):
-                    sim_log_file.write('\tThis quadrant was promised\n')
-                    promised_quadrants.append(quadrant)
-                else:
-                    sim_log_file.write("\tThis quadrant wasn't promised\n")
-                    quick_quadrants.append(quadrant)
-            for index in range(len(promised_quadrants)):
-                sim_log_file.write('Working on promises for quadrant %d of %d\n' % (index, len(promised_quadrants)))
-                work_quadrant = promised_quadrants[index]
-                for body in work_quadrant:
-                    body.massless_update(self, work_quadrant)
-                    self.active_contents[body].append((self.up_time, body.position))
-                    if len(body.flags) > 0:
-                        sim_log_file.write(str(body) + 'has %d flags after calculations\n' % len(body.flags))
-                        body.promised = True
-                        if type(body.flags[0]) == list:
-                            for other in body.flags[0]:
-                                sim_log_file.write(str(body) + 'is colliding with ' + str(other) + '\n')
-                            self.colliding_bodies.append(body.flags[0])
-                            del body.flags[0]
-                    planet_calculations += 1
-            for quadrant in quick_quadrants:
-                sim_log_file.write('Running quick calculations on quadrant ' + str(quadrant) + '\n')
-                for body in quadrant:
-                    turns_to_check = turns_to_flagcheck - body.turns_since_check
-                    if turns_to_check == 0:
-                        check = True
-                    else:
-                        check = False
-                    body.quick_update(check)
-                    self.active_contents[body].append((self.up_time, body.position))
-                    if check:
-                        if len(body.flags) > 0:
-                            sim_log_file.write(str(body) + 'has %d flags after calculations\n' % len(body.flags))
-                            body.promised = True
-                    planet_calculations += 1
-        else:
-            for key in self.active_contents:
-                key.massless_update(self)
-                self.active_contents[key].append((self.up_time, key.position))
-                if len(key.flags) > 0:
-                    sim_log_file.write(str(key) + 'has %d flags after calculations\n' % len(key.flags))
-                    key.promised = True
-                    if type(key.flags[0]) == list:
-                        for other in key.flags[0]:
-                            sim_log_file.write(str(key) + 'is colliding with ' + str(other) + '\n')
-                        self.register_colliding_bodies(key.flags[0])
-                        del key.flags[0]
-                planet_calculations += 1
+            updatepool.map(self.resolve_collisions, self.colliding_bodies)
+            self.colliding_bodies = []
+        if not use_quadrants:
+            updatepool.map(self.calculate_body_update, self.active_contents)
+            updatepool.map(self.apply_body_update, self.active_contents)
+            updatepool.map(self.check_body_flags, self.active_contents)
+            updatepool.close()
+            updatepool.join()
         self.up_time += 1
-        assert planet_calculations == len(self.active_contents)  # make sure that all bodies have been updated
         sim_log_file.write('Finished step\n')
+
+    def calculate_body_update(self, body):
+        body.calculate_update(self)
+
+    def check_body_flags(self, body):
+        self.active_contents[body].append((self.up_time, body.position))
+        if len(body.flags) > 0:
+            sim_log_file.write(str(body) + 'has %d flags after calculations\n' % len(body.flags))
+            body.promised = True
+            if type(body.flags[0]) == list:
+                for other in body.flags[0]:
+                    sim_log_file.write(str(body) + 'is colliding with ' + str(other) + '\n')
+                self.register_colliding_bodies(body.flags[0])
+                del body.flags[0]
+
+    @staticmethod
+    def apply_body_update(body):
+        body.apply_update()
 
     def register_colliding_bodies(self, system):
         system = sorted(system, key=lambda x: str(x))
@@ -328,42 +300,36 @@ class Universe:
         assert unaccounted_matter == 0
         return composition
 
-    def resolve_collisions(self):
-        if resolve_collisions:
-            while len(self.colliding_bodies) > 0:
-                sim_log_file.write('Resolving collisions for:\n')
-                workspace = self.colliding_bodies[0]
-                total_mass = 0
-                total_p = 0
-                total_l = 0
-                total_composition = [[x, 0] for x in element_dict.keys()]
-                total_composition = sorted(total_composition, key=lambda x: x[0])
-                total_position = [0, 0, 0]
-                for body in workspace:
-                    sim_log_file.write('\t%s\n' % body)
-                    total_mass += body.mass
-                    total_p += (body.mass * body.velocity)
-                    mom_iner = .4 * body.mass * body.radius ** 2
-                    total_l += (mom_iner * body.spin)
-                    for index, pair in enumerate(body.composition):
-                        total_composition[index][1] += pair[1]
-                    total_position += body.position
-                    self.removed_contents[body] = self.active_contents[body]
-                    del self.active_contents[body]
-                new_mass = total_mass
-                new_velocity = total_p / new_mass
-                for element, abundance in total_composition:
-                    abundance /= len(workspace)
-                new_composition = total_composition
-                new_position = total_position / len(workspace)
-                new_body = CelestialBody(new_composition, self, new_mass, new_position, new_velocity, total_l,
-                                         time=self.up_time)
-                self.active_contents[new_body] = []
-                self.active_contents[new_body].append(new_body.position)
-                self.collision_points.append(new_position)
-                del self.colliding_bodies[0]
-        else:
-            self.colliding_bodies = []
+    def resolve_collisions(self, workspace):
+        sim_log_file.write('Resolving collisions for:\n')
+        total_mass = 0
+        total_p = 0
+        total_l = 0
+        total_composition = [[x, 0] for x in element_dict.keys()]
+        total_composition = sorted(total_composition, key=lambda x: x[0])
+        total_position = [0, 0, 0]
+        for body in workspace:
+            sim_log_file.write('\t%s\n' % body)
+            total_mass += body.mass
+            total_p += (body.mass * body.velocity)
+            mom_iner = .4 * body.mass * body.radius ** 2
+            total_l += (mom_iner * body.spin)
+            for index, pair in enumerate(body.composition):
+                total_composition[index][1] += pair[1]
+            total_position += body.position
+            self.removed_contents[body] = self.active_contents[body]
+            del self.active_contents[body]
+        new_mass = total_mass
+        new_velocity = total_p / new_mass
+        for element, abundance in total_composition:
+            abundance /= len(workspace)
+        new_composition = total_composition
+        new_position = total_position / len(workspace)
+        new_body = CelestialBody(new_composition, self, new_mass, new_position, new_velocity, total_l,
+                                 time=self.up_time)
+        self.active_contents[new_body] = []
+        self.active_contents[new_body].append(new_body.position)
+        self.collision_points.append(new_position)
 
     def __str__(self):
         return 'number of stars: %d of %d' % (len(self.stars), self.number_of_bodies)
@@ -436,8 +402,17 @@ class Universe:
                 print('..')
         print('Labelling')
         self.ax1.text(xs[-1], ys[-1], zs[-1], '%s' % body.name, size=5, color='b')
-        #  self.ax1.quiver(xs[-1], ys[-1], zs[-1], body.acceleration[0], body.acceleration[1], body.acceleration[2],
-        #             length=2e4)
+
+
+class BodyUpdate:
+    def __init__(self, body):
+        self.luminosity = body.luminosity
+        self.surface_temperature = body.surface_temperature
+        self.can_fuse = body.can_fuse
+        self.position = body.position
+        self.velocity = body.velocity
+        self.acceleration = body.acceleration
+        self.rotation = body.rotation
 
 
 class CelestialBody:
@@ -492,6 +467,7 @@ class CelestialBody:
                               'proximity_alert': self.is_proximal
                               }
         self.log_gen_info(time)
+        self.update = None
 
     def check_schwarz_radius(self):
         if self.radius <= self.schwarzchild_radius:
@@ -606,6 +582,47 @@ class CelestialBody:
             if self.previous_state[key] != self.current_state[key]:
                 self.flags.append(key)
 
+    def calculate_update(self, parent):
+        sim_log_file.writelines('%s\n' % self)
+        current_quadrant = list(parent.active_contents.keys())
+        nearby_objects = self.proximity_check(current_quadrant)
+        self.update = BodyUpdate(self)
+        if len(nearby_objects) > 0:
+            sim_log_file.writelines('\tis now proximal\n')
+            colliding_with = self.collision_check(nearby_objects)
+            if colliding_with is not None:
+                sim_log_file.writelines('\tis now colliding with: ')
+                for body in colliding_with:
+                    sim_log_file.writelines(str(body) + ' ')
+                sim_log_file.writelines('\n')
+                self.flags.insert(0, colliding_with)
+        if not self.is_blackhole:
+            self.update.luminosity = self.get_luminosity()
+            self.update.surface_temperature = self.get_surface_temp(parent)
+            self.update.can_fuse = self.has_fusion(True)
+        self.update.position = np.add(self.position, np.multiply(self.velocity, timestep), casting="unsafe")
+        self.update.velocity = np.add(self.velocity, np.multiply(self.acceleration, timestep), casting="unsafe")
+        sim_log_file.write('\tis now located at: ' + str(self.position) + '\n')
+        sim_log_file.write('\tis now moving at ' + str(self.velocity) + ' m/dt\n')
+        self.update.acceleration = self.update_acceleration(nearby_objects)
+        sim_log_file.write('\tis now accelerating at ' + str(self.velocity) + ' m/dt^2\n')
+        self.update.rotation += self.spin * timestep
+
+    def apply_update(self):
+        assert self.update is not None
+        self.luminosity = self.update.luminosity
+        self.surface_temperature = self.update.surface_temperature
+        self.can_fuse = self.update.can_fuse
+        self.position = self.update.position
+        self.velocity = self.update.velocity
+        self.acceleration = self.update.acceleration
+        self.rotation = self.update.rotation
+        self.run_flag_check()
+        for key in self.previous_state:
+            self.previous_state[key] = bool(self.current_state[key])
+        self.update = None
+        return
+
     def massless_update(self, parent, current_quadrant=None):
         sim_log_file.writelines('%s\n' % self)
         if current_quadrant is None:
@@ -664,6 +681,7 @@ class CelestialBody:
     def get_avg_density(self):
         density_sum = 0
         density_components = len(self.composition)
+
         abundance_sum = 0
         for element, abundance in self.composition:
             abundance_sum += abundance
