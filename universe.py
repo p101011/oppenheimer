@@ -1,9 +1,7 @@
-import cProfile
 import os.path
 import math
 import random
 import datetime
-import timeit
 
 import matplotlib as mpl
 import numpy as np
@@ -11,7 +9,6 @@ import matplotlib.pyplot as plt
 from gmpy2 import mpz
 from mpl_toolkits.mplot3d import Axes3D
 from markovnamegen import MarkovGenerator
-from multiprocessing.dummy import Pool as ThreadPool
 
 # universe generation constants (or values which probably wont be tweaked)
 max_planet_mass = 2.85e32
@@ -45,18 +42,17 @@ starting_point_max = .5 * AU  # max position in 3d space
 big_bang_momentum = 0  # starting impulse for planets in kg*m/s
 
 # universe simulation variables
-timestep = 180  # measured in seconds
+timestep = 90  # measured in seconds
 turns_to_flagcheck = 10  # steps to take before a planet checks whether intensive calculations are needed (unused)
-proximity_limit = 2 * AU  # radius to check for proximity alert on object simulation
+proximity_limit = 1 * AU  # radius to check for proximity alert on object simulation
 turn_limit = 2000  # how long to run the simulation
-alert_freq = 5  # print status every N turns
+alert_freq = 50  # print status every N turns
 use_quadrants = False  # use quadrants to optimize calculations. currently used for multiproccessing sims
-resolve_collisions = False  # to make prototyping easier, ignore collisions
+resolve_collisions = True  # to make prototyping easier, ignore collisions
 use_custom_seed = False  # look for user specified seed when initializing
 quiet = True  # whether we should spam the console when plotting (will update later with levels)
-generate_plots = True  # whether we should output plots
-generate_json = False
-test_map = True # used to test pool.map vs map
+generate_plots = False  # whether we should output plots
+generate_json = True
 
 # json file variables
 dist_units = 15 * solar_radius  # can't have such huge numbers, so all values will be in solar radii
@@ -109,7 +105,7 @@ for file in file_list:
     name_generator.load_csv(file_path)
 
 # parallel processing initialization
-thread_count = 2  # how many threads to utilize (4 on laptop, 8 on pc)
+thread_count = 8  # how many threads to utilize (4 on laptop, 8 on pc)
 
 
 class Universe:
@@ -139,13 +135,8 @@ class Universe:
         self.up_time = 0
         self.vpy_spheres = []
         self.colliding_bodies = []
-        if use_quadrants:
-            initpool = ThreadPool(thread_count)
-            for i in range(self.number_of_bodies):
-                initpool.apply_async(self.generate_planet(), ())
-        else:
-            for i in range(self.number_of_bodies):
-                self.generate_planet()
+        for i in range(self.number_of_bodies):
+            self.generate_planet()
         for body in self.active_contents:
             body.get_surface_temp(self)
             if body.is_blackhole:
@@ -157,7 +148,7 @@ class Universe:
         gen_log_file.writelines('Generated %d planets, %d stars, and %d blackholes' % (
             len(self.planets), len(self.stars), len(self.blackholes)) + '\n')
         print('Generation complete - number of stars: %d of %d' % (len(self.stars), self.number_of_bodies))
-        #gen_log_file.close()
+        gen_log_file.close()
         if generate_plots:
             print('Initializing Plots')
             self.output = plt.figure()
@@ -183,6 +174,7 @@ class Universe:
             json_name = 'lastgen.json'
             json_path = os.path.join(json_path, json_name)
             self.json_file = open(json_path, 'w')
+            self.json_output = ['{"name": "%s", "turns": [' % self.name]
 
     def generate_planet(self):
         print('Generating Body')
@@ -211,13 +203,11 @@ class Universe:
         lines[-1] = lines[-1][:-1]
         lines.append(']}')
         self.json_file.writelines(lines)
-        #self.json_file.close()
+        self.json_file.close()
 
     def plot_data(self, data='mass'):
         if data == 'mass':
-            plot = []
-            for body in self.active_contents:
-                plot.append(body.mass)
+            plot = [body.mass for body in self.active_contents]
             plot.sort()
             plt.hist(plot, 100)
             plt.xlabel('Mass (kg)')
@@ -235,29 +225,36 @@ class Universe:
         the changes. Fourth phase is a promise check. If any bodies send up a flag signalling more thorough
         calculations needed, they are added to the promise list for next turn. """
         sim_log_file.write('\nExecuting step %d: \n' % self.up_time)
-        promised_quadrants = []
-        quick_quadrants = []
-        planet_calculations = 0
-        updatepool = ThreadPool(thread_count)
         if len(self.colliding_bodies) > 0:
             sim_log_file.write('There are %d colliding systems this step\n' % len(self.colliding_bodies))
-            if use_quadrants:
-                updatepool.map(self.resolve_collisions, self.colliding_bodies)
-            else:
-                updatepool.map(self.resolve_collisions, self.colliding_bodies)
+            map(self.resolve_collisions, self.colliding_bodies)
             self.colliding_bodies = []
-        if use_quadrants:
-            updatepool.map(self.calculate_body_update, self.active_contents)
-            updatepool.map(self.apply_body_update, self.active_contents)
-            updatepool.map(self.check_body_flags, self.active_contents)
-            updatepool.close()
-            updatepool.join()
+        if generate_json:
+            json_file = self.json_output
+            json_file.append('{"planets": [')
+            append = json_file.append
+            for key in self.active_contents:
+                self.calculate_body_update(key)
+                self.apply_body_update(key)
+                self.check_body_flags(key)
+                position = key.position
+                append('{"name": "%s", "radius": "%f", "position": ["%f", "%f", "%f"], "exists": "true"},' % (
+                    key.name, key.radius / dist_units, position[0] / dist_units, position[1] / dist_units,
+                    position[2] / dist_units))
+            for key in self.removed_contents:
+                position = key.position
+                append('{"name": "%s", "radius": "%f", "position": ["%f", "%f", "%f"], "exists": "false"},' % (
+                    key.name, key.radius / dist_units, position[0] / dist_units, position[1] / dist_units,
+                    position[2] / dist_units))
+            json_file[-1] = json_file[-1][:-1]
+            append(']},')
+            self.json_output = json_file
         else:
-            map(self.calculate_body_update, self.active_contents)
-            map(self.apply_body_update, self.active_contents)
-            map(self.check_body_flags, self.active_contents)
+            for key in self.active_contents:
+                self.calculate_body_update(key)
+                self.apply_body_update(key)
+                self.check_body_flags(key)
         self.up_time += 1
-        updatepool.close()
         sim_log_file.write('Finished step\n')
 
     def calculate_body_update(self, body):
@@ -336,11 +333,467 @@ class Universe:
         new_body = CelestialBody(new_composition, self, new_mass, new_position, new_velocity, total_l,
                                  time=self.up_time)
         self.active_contents[new_body] = []
-        self.active_contents[new_body].append(new_body.position)
+        self.active_contents[new_body].append((self.up_time, new_body.position))
         self.collision_points.append(new_position)
+
+    def reesolve_collisions(self, workspace):
+        body1 = workspace.pop(0)
+        body2 = workspace.pop(1)
+        if body1.mass < body2.mass:
+            projectile = body1
+            target = body2
+        else:
+            target = body1
+            projectile = body2
+        cstar = 5  # material constant for how energy is dissipated, higher means sharper? 5 for solids, 1.9 for fluids
+        total_mass = body1.mass + body2.mass
+        average_density = (body1.density + body2.density) / 2
+        mu = random.randrange(333, 666) / 1000  # material constant for some physics shit, falls between .33 and .66
+        gamma = projectile.mass / total_mass  # ratio of projectile mass to larger mass (smaller body is projectile)
+        target_radius = target.radius * 100  # radius of larger body in cm
+        system_velocity = (target.velocity - projectile.velocity)
+        impact_velocity = np.sqrt(system_velocity.dot(system_velocity)) * 100  # velocity at impact in cm/s
+        impact_angle = self.get_vector_angles(body1.velocity, body2.velocity)  # 0 rad = head on, pi/2 = perpendicular
+        bb = np.sin(impact_angle)  # not sure why, but physics wants impact angle in sin(x) radians
+        ## HERE BE DRAGONS, I DONT UNDERSTAND THEIR SHITTY VAR NAMES ##
+        rho1 = 1  # density of one body? 1 g/cm3. not really sure
+        barr = [
+        0.0000000,
+        0.045693737,
+        0.066364088,
+        0.082256556,
+        0.095746684,
+        0.10747497,
+        0.11814432,
+        0.12797298,
+        0.13711830,
+        0.14570045,
+        0.15381270,
+        0.16152855,
+        0.16890663,
+        0.17599424,
+        0.18282998,
+        0.18938688,
+        0.19572389,
+        0.20189088,
+        0.20790679,
+        0.21368939,
+        0.21935568,
+        0.22491598,
+        0.23027924,
+        0.23556216,
+        0.24073394,
+        0.24577314,
+        0.25075642,
+        0.25559341,
+        0.26037714,
+        0.26506051,
+        0.26966749,
+        0.27420728,
+        0.27865712,
+        0.28306245,
+        0.28737215,
+        0.29165130,
+        0.29583558,
+        0.29999617,
+        0.30406782,
+        0.30811682,
+        0.31208701,
+        0.31603082,
+        0.31990928,
+        0.32375382,
+        0.32754908,
+        0.33129978,
+        0.33501932,
+        0.33868123,
+        0.34233159,
+        0.34590940,
+        0.34948218,
+        0.35299439,
+        0.35648750,
+        0.35994531,
+        0.36336282,
+        0.36677042,
+        0.37011604,
+        0.37345687,
+        0.37675438,
+        0.38002695,
+        0.38328439,
+        0.38649197,
+        0.38969489,
+        0.39285761,
+        0.39599871,
+        0.39912906,
+        0.40221124,
+        0.40528885,
+        0.40833698,
+        0.41135844,
+        0.41437538,
+        0.41734794,
+        0.42031136,
+        0.42326098,
+        0.42617324,
+        0.42908110,
+        0.43196420,
+        0.43482324,
+        0.43767790,
+        0.44049949,
+        0.44330752,
+        0.44611121,
+        0.44887575,
+        0.45163489,
+        0.45438477,
+        0.45710128,
+        0.45981351,
+        0.46251225,
+        0.46518369,
+        0.46785091,
+        0.47050190,
+        0.47313010,
+        0.47575408,
+        0.47836041,
+        0.48094704,
+        0.48352948,
+        0.48609393,
+        0.48864063,
+        0.49118315,
+        0.49370823,
+        0.49621650,
+        0.49872064,
+        0.50120863,
+        0.50367995,
+        0.50614716,
+        0.50860012,
+        0.51103588,
+        0.51346757,
+        0.51588737,
+        0.51828889,
+        0.52068634,
+        0.52307465,
+        0.52544320,
+        0.52780768,
+        0.53016602,
+        0.53250281,
+        0.53483555,
+        0.53716421,
+        0.53947146,
+        0.54177362,
+        0.54407170,
+        0.54635266,
+        0.54862530,
+        0.55089390,
+        0.55314963,
+        0.55539383,
+        0.55763399,
+        0.55986545,
+        0.56208222,
+        0.56429495,
+        0.56650301,
+        0.56869331,
+        0.57087961,
+        0.57306184,
+        0.57522978,
+        0.57739052,
+        0.57954723,
+        0.58169408,
+        0.58383018,
+        0.58596224,
+        0.58808859,
+        0.59020090,
+        0.59230918,
+        0.59441341,
+        0.59650489,
+        0.59859020,
+        0.60067147,
+        0.60274416,
+        0.60480729,
+        0.60686637,
+        0.60892066,
+        0.61096237,
+        0.61300003,
+        0.61503361,
+        0.61705726,
+        0.61907422,
+        0.62108710,
+        0.62309367,
+        0.62509063,
+        0.62708351,
+        0.62907230,
+        0.63105082,
+        0.63302437,
+        0.63499382,
+        0.63695630,
+        0.63891117,
+        0.64086193,
+        0.64280850,
+        0.64474533,
+        0.64667804,
+        0.64860660,
+        0.65052818,
+        0.65244342,
+        0.65435450,
+        0.65626094,
+        0.65815931,
+        0.66005350,
+        0.66194351,
+        0.66382691,
+        0.66570478,
+        0.66757844,
+        0.66944735,
+        0.67130945,
+        0.67316731,
+        0.67502093,
+        0.67686854,
+        0.67871111,
+        0.68054943,
+        0.68238306,
+        0.68421087,
+        0.68603438,
+        0.68785360,
+        0.68966751,
+        0.69147672,
+        0.69328163,
+        0.69508198,
+        0.69687736,
+        0.69866838,
+        0.70045504,
+        0.70223711,
+        0.70401472,
+        0.70578794,
+        0.70755681,
+        0.70932146,
+        0.71108168,
+        0.71283745,
+        0.71458937,
+        0.71633702,
+        0.71808018,
+        0.71981921,
+        0.72155469,
+        0.72328565,
+        0.72501208,
+        0.72673546,
+        0.72845461,
+        0.73016920,
+        0.73187992,
+        0.73358766,
+        0.73529078,
+        0.73698927,
+        0.73868548,
+        0.74037751,
+        0.74206485,
+        0.74374871,
+        0.74543001,
+        0.74710657,
+        0.74877840,
+        0.75044889,
+        0.75211502,
+        0.75377634,
+        0.75543476,
+        0.75709077,
+        0.75874193,
+        0.76038824,
+        0.76203441,
+        0.76367572,
+        0.76531212,
+        0.76694649,
+        0.76857830,
+        0.77020509,
+        0.77182760,
+        0.77345013,
+        0.77506760,
+        0.77668001,
+        0.77829177,
+        0.77990021,
+        0.78150352,
+        0.78310375,
+        0.78470344,
+        0.78629791,
+        0.78788716,
+        0.78947778,
+        0.79106367,
+        0.79264426,
+        0.79422374,
+        0.79580129,
+        0.79737346,
+        0.79894181,
+        0.80051126,
+        0.80207524,
+        0.80363373,
+        0.80519406,
+        0.80675006,
+        0.80830052,
+        0.80985020,
+        0.81139843,
+        0.81294098,
+        0.81448010,
+        0.81602074,
+        0.81755561,
+        0.81908469,
+        0.82061748,
+        0.82214484,
+        0.82366630,
+        0.82518913,
+        0.82670913,
+        0.82822312,
+        0.82973612,
+        0.83124891,
+        0.83275558,
+        0.83425892,
+        0.83576463,
+        0.83726409,
+        0.83875797,
+        0.84025672,
+        0.84174908,
+        0.84323504,
+        0.84472562,
+        0.84621100,
+        0.84768981,
+        0.84917178,
+        0.85065019,
+        0.85212191,
+        0.85359555,
+        0.85506708,
+        0.85653175,
+        0.85799738,
+        0.85946206,
+        0.86091971,
+        0.86237768,
+        0.86383551,
+        0.86528614,
+        0.86673682,
+        0.86818779,
+        0.86963137,
+        0.87107520,
+        0.87251926,
+        0.87395573,
+        0.87539315,
+        0.87683023,
+        0.87825952,
+        0.87969102,
+        0.88112101,
+        0.88254302,
+        0.88396913,
+        0.88539189,
+        0.88680641,
+        0.88822768,
+        0.88964304,
+        0.89105046,
+        0.89246693,
+        0.89387465,
+        0.89527819,
+        0.89668704,
+        0.89808686,
+        0.89948719,
+        0.90088811,
+        0.90227971,
+        0.90367753,
+        0.90507016,
+        0.90645534,
+        0.90784921,
+        0.90923313,
+        0.91061710,
+        0.91200212,
+        0.91337681,
+        0.91476039,
+        0.91613600,
+        0.91750828,
+        0.91888493,
+        0.92025048,
+        0.92162388,
+        0.92299017,
+        0.92435325,
+        0.92572034,
+        0.92707543,
+        0.92844135,
+        0.92979680,
+        0.93115362,
+        0.93250939,
+        0.93385757,
+        0.93521360,
+        0.93655606,
+        0.93790983,
+        0.93925182,
+        0.94059851,
+        0.94193981,
+        0.94328007,
+        0.94462039,
+        0.94595493,
+        0.94729390,
+        0.94862350,
+        0.94996064,
+        0.95128617,
+        0.95262090,
+        0.95394320,
+        0.95527478,
+        0.95659482,
+        0.95792238,
+        0.95924112,
+        0.96056358,
+        0.96188201,
+        0.96319804,
+        0.96451711,
+        0.96582512,
+        0.96714572,
+        0.96845341,
+        0.96976664,
+        0.97107799,
+        0.97237832,
+        0.97369359,
+        0.97499968,
+        0.97629708,
+        0.97760891,
+        0.97891370,
+        0.98021245,
+        0.98151163,
+        0.98281788,
+        0.98412057,
+        0.98542089,
+        0.98672016,
+        0.98801963,
+        0.98932040,
+        0.99062314,
+        0.99192764,
+        0.99323206,
+        0.99453230,
+        0.99585543,
+        0.99717836,
+        0.99851871]  # some weird-ass probability list
+        rhon = average_density / 1000  # density of one body? site says both bodies assumed same rho, so who knows
+        mt = (4 * math.pi * rhon * target_radius ** 3) / 3
+        mp = gamma * mt
+        mtot = (1 + gamma) * mt
+        mred = mp * mt / mtot
+        rpn = (mp / (4 * math.pi * rhon / 3)) ** (1/3)
+        rc1 = (mt * (1 + gamma) / (4 * math.pi * rhon / 3)) ** (1/3)
+        vescrtn = (2 * G * mtot / (target_radius + rpn)) ** (1/2)
+        vescrtn = (2 * G * mtot / target_radius) ** (1/2)
+        vesc = vescrtn  # why? duplicate values for planets? maybe these should be different for bodies?
+        qg = (1/8) * ((32 * math.pi * cstar / 5) ** (3/2 * mu))
+        bcrit = target_radius / (target_radius + rpn)
+        qangle = self.quangle  # this is some array len 400 fuck this shit
+        qangle1 = self.quangle1  # because i thought their names couldnt get worse
+        # determining outcome
+        barrind = 0  # index of the impact parameter? not really sure
+        for index in range(len(barr)):
+            if bb > barr[index]:
+                barrind = index
+        if bb < bcrit:  # non-grazing regime
+            gsim = (0.5 * (mp * mt / (mp + mt)) * impact_velocity * impact_velocity) / (mp + mt)
+            mlrmtot = -0.5 * (qsim / qangle[])
+
+
 
     def __str__(self):
         return 'number of stars: %d of %d' % (len(self.stars), self.number_of_bodies)
+
+    @staticmethod
+    def get_vector_angles(vec1, vec2):
+        uvec1 = vec1 / np.linalg.norm(vec1)
+        uvec2 = vec2 / np.linalg.norm(vec2)
+        angle = np.arccos(np.clip(np.dot(uvec1, uvec2), -1.0, 1.0))
+        if angle > math.pi / 2:
+            angle = math.pi - angle
+        return angle
 
     def run_sim(self):
         print('Begin simulation')
@@ -348,24 +801,25 @@ class Universe:
             if self.up_time % alert_freq == 0:
                 print('Running step %d' % self.up_time)
             self.update_step()
-        #sim_log_file.close()
+        sim_log_file.close()
         print('Simulation Complete')
+        if generate_json:
+            body_count = len(self.active_contents) + len(self.removed_contents)
+            self.json_output[-1] = self.json_output[-1][:-1]
+            self.json_output.append('], "body_count": "%d"}' % body_count)
+            self.json_file.writelines(self.json_output)
+            self.json_file.close()
+            print('JSON File finished - %d total bodies simulated' % body_count)
         if generate_plots:
             print('Making Plots')
             self.generate_sim_plot()
-        if generate_json:
-            print('Writing JSON')
-            self.dump_info()
 
     def generate_sim_plot(self):
-        pool = ThreadPool(thread_count)
         mpl.rcParams['legend.fontsize'] = 6
         print('Getting total contents of universe')
         self.total_contents = self.active_contents.copy()
         self.total_contents.update(self.removed_contents)
-        pool.map(self.plot_body, self.total_contents)
-        pool.close()
-        pool.join()
+        list(map(self.plot_body, self.total_contents))
         print('Plotting collisions')
         for point in self.collision_points:
             self.ax1.scatter(int(point[0]), int(point[1]), int(point[2]), c='r')
@@ -395,20 +849,19 @@ class Universe:
         self.ax4.set_prop_cycle('color', [cm(1. * i / (turn_limit - 1)) for i in range(turn_limit - 1)])
         print('Plotting history')
         for i in range(turn_limit - 1):
+            if not quiet:
+                print(i)
             self.ax1.plot(xs[i:i + 2], ys[i:i + 2], zs[i:i + 2], solid_capstyle='projecting')
-            if not quiet:
-                print('.')
             self.ax2.plot(xs[i:i + 2], ys[i:i + 2], solid_capstyle='projecting')
-            if not quiet:
-                print('..')
             self.ax3.plot(xs[i:i + 2], zs[i:i + 2], solid_capstyle='projecting')
-            if not quiet:
-                print('...')
             self.ax4.plot(ys[i:i + 2], zs[i:i + 2], solid_capstyle='projecting')
-            if not quiet:
-                print('..')
         print('Labelling')
         self.ax1.text(xs[-1], ys[-1], zs[-1], '%s' % body.name, size=5, color='b')
+
+    @staticmethod
+    def build_and_run():
+        universe = Universe()
+        universe.run_sim()
 
 
 class BodyUpdate:
@@ -702,15 +1155,12 @@ class CelestialBody:
         assert avg_density > 0
         return avg_density
 
-    def get_distance(self, point=None, direction="away"):
+    def get_distance(self, point=None):
         if point is None:
             point = [0, 0, 0]
         else:
             point = point.position
-        if direction == 'towards':
-            direction_vector = self.position - point
-        else:
-            direction_vector = point - self.position
+        direction_vector = point - self.position
         magnitude = (direction_vector.dot(direction_vector)) ** .5
         unit_vector = direction_vector / magnitude
         return unit_vector, magnitude
@@ -718,8 +1168,7 @@ class CelestialBody:
     def update_acceleration(self, nearby_objects):
         acceleration = self.acceleration
         for body, distance in nearby_objects:
-            direction, distance = self.get_distance(body,
-                                                    'tords')  # NOTE: Unit vector is maybe provided away from position
+            direction, distance = self.get_distance(body)
             grav_acc = G * body.mass / (distance ** 2)
             da = grav_acc * direction
             acceleration += da
@@ -738,37 +1187,22 @@ class CelestialBody:
 
 def stress_test():
     global turn_limit, seed, timestep, alert_freq, quiet, thread_count, planet_min_count, planet_max_count, use_quadrants, generate_json, generate_plots, test_map
-    turn_limit = 500
-    seed = 100
-    timestep = 1
-    alert_freq = 5
-    quiet = True
-    use_quadrants = False
-    thread_count = 2
-    planet_count = 100
+    turn_limit = 2000
+    seed = 1000
+    timestep = 30
+    alert_freq = 100
+    quiet = False
+    use_quadrants = True
+    thread_count = 4
+    planet_count = 8
     planet_max_count = planet_count
     planet_min_count = planet_count
-    generate_json = False
-    generate_plots = False
+    generate_json = True
+    generate_plots = True
     random.seed(seed)
     np.random.seed(seed)
     testverse = Universe()
     testverse.run_sim()
 
 
-def exec_stress_test():
-    trial_count = 10
-    exec_time = timeit.timeit(stmt=stress_test, number=trial_count)
-    print(exec_time / trial_count)
-    # laptop (1) : 279.58
-    # laptop (2) :94.69
-    # laptop (4) : 122.85
-    # pc (1) :
-    # pc (2) :
-    # pc (4) :
-    # pc (8) :
-    # laptop (2) (pool.map - 100 bodies) : .52
-    # laptop (2) (map - 100 bodies) : .47
-
-
-cProfile.run('stress_test()', sort='cumulative')
+Universe.build_and_run()
